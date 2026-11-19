@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600" fill="none">
+  <rect width="400" height="600" fill="#191820"/>
+  <rect x="118" y="205" width="164" height="164" rx="28" fill="#292633"/>
+  <path d="m179 247 64 40-64 40v-80Z" fill="#9993aa"/>
+  <text x="200" y="420" fill="#9993aa" font-family="Arial, sans-serif" font-size="20" text-anchor="middle">No poster available</text>
+</svg>
