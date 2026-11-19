@@ -769,6 +769,60 @@
   font-size: 9px;
   font-weight: 700;
 }
+.csv-profile-card,
+.import-card {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.csv-profile-card label,
+.import-card h3 {
+  display: block;
+  margin: 0 0 7px;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+.csv-profile-card select,
+.import-card input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 10px;
+}
+.csv-profile-card p,
+.import-card p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+.import-card input + input {
+  margin-top: 8px;
+}
+.import-card button {
+  width: 100%;
+  margin-top: 9px;
+  padding: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+.import-card button:disabled {
+  opacity: 0.45;
+}
+.import-card .import-message {
+  color: var(--green);
+}
 .stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

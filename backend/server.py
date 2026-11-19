@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -107,18 +108,47 @@ def clean_user_id(user_id):
     return user_id[:48]
 
 
-def feedback_path(user_id):
+def clean_profile_name(profile):
+    profile = re.sub(r"[^A-Za-z0-9_-]+", "-", str(profile or "")).strip("-_").lower()
+    return profile[:48] or "default"
+
+
+def feedback_path(user_id, profile="default"):
     USERS_DIR.mkdir(parents=True, exist_ok=True)
-    return USERS_DIR / f"{clean_user_id(user_id)}_movie.csv"
+    user_id = clean_user_id(user_id)
+    profile = clean_profile_name(profile)
+    if profile == "default":
+        return USERS_DIR / f"{user_id}_movie.csv"
+    return USERS_DIR / f"{user_id}__{profile}_movie.csv"
 
 
-def skipped_path(user_id):
+def skipped_path(user_id, profile="default"):
     USERS_DIR.mkdir(parents=True, exist_ok=True)
-    return USERS_DIR / f"{clean_user_id(user_id)}_skipped.csv"
+    user_id = clean_user_id(user_id)
+    profile = clean_profile_name(profile)
+    if profile == "default":
+        return USERS_DIR / f"{user_id}_skipped.csv"
+    return USERS_DIR / f"{user_id}__{profile}_skipped.csv"
 
 
-def load_skipped_ids(user_id):
-    path = skipped_path(user_id)
+def available_profiles(user_id):
+    user_id = clean_user_id(user_id)
+    feedback_path(user_id)
+    profiles = {"default"}
+    prefix = f"{user_id}__"
+    suffix = "_movie.csv"
+    for path in USERS_DIR.glob(f"{user_id}__*_movie.csv"):
+        profiles.add(clean_profile_name(path.name[len(prefix):-len(suffix)]))
+    return sorted(profiles, key=lambda profile: (profile != "default", profile))
+
+
+def select_profile(user_id, profile):
+    profile = clean_profile_name(profile)
+    return profile if profile in available_profiles(user_id) else "default"
+
+
+def load_skipped_ids(user_id, profile="default"):
+    path = skipped_path(user_id, profile)
     if not path.exists():
         return set()
     skipped = pd.read_csv(path)
@@ -128,8 +158,8 @@ def load_skipped_ids(user_id):
     return set(ids.tolist())
 
 
-def load_feedback(user_id):
-    path = feedback_path(user_id)
+def load_feedback(user_id, profile="default"):
+    path = feedback_path(user_id, profile)
     if not path.exists():
         pd.DataFrame(columns=["movie_id", "title", "liked"]).to_csv(path, index=False)
     feedback = pd.read_csv(path)
@@ -140,6 +170,8 @@ def load_feedback(user_id):
     feedback = feedback.dropna(subset=["movie_id", "liked"])
     feedback["movie_id"] = feedback["movie_id"].astype("int64")
     feedback["liked"] = feedback["liked"].astype("int64")
+    if "title" not in feedback.columns:
+        feedback["title"] = ""
     return feedback[["movie_id", "title", "liked"]].drop_duplicates("movie_id", keep="last")
 
 
@@ -170,8 +202,8 @@ def movie_to_json(movie, match=None):
     }
 
 
-def rated_movies(user_id):
-    feedback = load_feedback(user_id)
+def rated_movies(user_id, profile="default"):
+    feedback = load_feedback(user_id, profile)
     if feedback.empty:
         return feedback, []
 
@@ -186,21 +218,25 @@ def rated_movies(user_id):
     return feedback, rated
 
 
-def session_data(user_id):
-    feedback, rated = rated_movies(user_id)
+def session_data(user_id, profile="default"):
+    profile = select_profile(user_id, profile)
+    feedback, rated = rated_movies(user_id, profile)
     return {
         "user_id": clean_user_id(user_id),
+        "profile": profile,
+        "profiles": available_profiles(user_id),
         "feedback": {str(int(row.movie_id)): int(row.liked) for row in feedback.itertuples()},
         "rated": rated,
     }
 
 
-def rank_movies(user_id, number=10, unrated_only=False):
-    feedback = load_feedback(user_id)
+def rank_movies(user_id, number=10, unrated_only=False, profile="default"):
+    profile = select_profile(user_id, profile)
+    feedback = load_feedback(user_id, profile)
     candidates = movies.copy()
     if unrated_only:
         rated_ids = set(feedback["movie_id"].tolist())
-        skipped_ids = load_skipped_ids(user_id)
+        skipped_ids = load_skipped_ids(user_id, profile)
         candidates = candidates[
             ~candidates["id"].isin(rated_ids | skipped_ids)
         ].copy()
@@ -228,9 +264,46 @@ def rank_movies(user_id, number=10, unrated_only=False):
     return [movie_to_json(row, row["like_probability"]) for _, row in top.iterrows()]
 
 
-def next_movie(user_id):
-    recommendations = rank_movies(user_id, number=1, unrated_only=True)
+def next_movie(user_id, profile="default"):
+    recommendations = rank_movies(user_id, number=1, unrated_only=True, profile=profile)
     return recommendations[0] if recommendations else None
+
+
+def import_feedback(user_id, profile, csv_text):
+    profile = clean_profile_name(profile)
+    if profile == "default":
+        raise ValueError("Choose a profile name other than 'default'.")
+
+    path = feedback_path(user_id, profile)
+    if path.exists():
+        raise ValueError("A profile with this name already exists. Choose another name.")
+    if not str(csv_text or "").strip():
+        raise ValueError("Choose a CSV file to import.")
+
+    try:
+        imported = pd.read_csv(io.StringIO(csv_text))
+    except Exception as error:
+        raise ValueError("Could not read that CSV file.") from error
+
+    if not {"movie_id", "liked"}.issubset(imported.columns):
+        raise ValueError("The CSV needs movie_id and liked columns.")
+
+    imported["movie_id"] = pd.to_numeric(imported["movie_id"], errors="coerce")
+    imported["liked"] = pd.to_numeric(imported["liked"], errors="coerce")
+    if imported[["movie_id", "liked"]].isna().any().any():
+        raise ValueError("Each row needs a movie_id and a like value of 0 or 1.")
+    if not imported["liked"].isin([0, 1]).all():
+        raise ValueError("The liked column must only contain 0 or 1.")
+
+    imported["movie_id"] = imported["movie_id"].astype("int64")
+    if not imported["movie_id"].isin(movies["id"]).all():
+        raise ValueError("The CSV includes movie IDs that are not in this catalog.")
+
+    imported = imported.drop_duplicates("movie_id", keep="last")
+    title_lookup = movies.set_index("id")["title"]
+    imported["title"] = imported["movie_id"].map(title_lookup)
+    imported[["movie_id", "title", "liked"]].to_csv(path, index=False)
+    return session_data(user_id, profile)
 
 
 def search_movies(query, number=50):
@@ -262,20 +335,28 @@ class MovieHandler(BaseHTTPRequestHandler):
         user_values = parse_qs(query).get("user_id", [""])
         return clean_user_id(user_values[0])
 
+    def get_profile(self, query, user_id):
+        profile_values = parse_qs(query).get("profile", ["default"])
+        return select_profile(user_id, profile_values[0])
+
     def do_GET(self):
         url = urlparse(self.path)
         try:
             if url.path == "/api/health":
                 return self.send_json(200, {"ok": True, "movie_count": len(movies)})
             if url.path == "/api/session":
-                return self.send_json(200, session_data(self.get_user(url.query)))
+                user_id = self.get_user(url.query)
+                return self.send_json(200, session_data(user_id, self.get_profile(url.query, user_id)))
             if url.path == "/api/recommendations":
                 query = parse_qs(url.query)
                 user_id = clean_user_id(query.get("user_id", [""])[0])
+                profile = self.get_profile(url.query, user_id)
                 number = min(max(int(query.get("limit", ["10"])[0]), 1), 50)
-                return self.send_json(200, {"movies": rank_movies(user_id, number)})
+                return self.send_json(200, {"movies": rank_movies(user_id, number, profile=profile)})
             if url.path == "/api/reels/next":
-                return self.send_json(200, {"movie": next_movie(self.get_user(url.query))})
+                user_id = self.get_user(url.query)
+                profile = self.get_profile(url.query, user_id)
+                return self.send_json(200, {"movie": next_movie(user_id, profile)})
             if url.path == "/api/search":
                 query = parse_qs(url.query).get("q", [""])[0]
                 return self.send_json(200, {"movies": search_movies(query)})
@@ -292,39 +373,45 @@ class MovieHandler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length).decode("utf-8"))
             user_id = clean_user_id(data.get("user_id", ""))
 
+            if url.path == "/api/import":
+                session = import_feedback(user_id, data.get("profile_name", ""), data.get("csv_text", ""))
+                return self.send_json(200, session)
+
+            profile = select_profile(user_id, data.get("profile", "default"))
+
             if url.path == "/api/feedback":
                 movie_id = int(data["movie_id"])
                 liked = int(data["liked"])
                 if liked not in (0, 1):
                     return self.send_json(400, {"error": "liked must be 0 or 1."})
                 movie = movies.loc[movies["id"] == movie_id].iloc[0]
-                feedback = load_feedback(user_id)
+                feedback = load_feedback(user_id, profile)
                 feedback = feedback[feedback["movie_id"] != movie_id]
                 feedback.loc[len(feedback)] = {
                     "movie_id": movie_id,
                     "title": str(movie["title"]),
                     "liked": liked,
                 }
-                feedback.to_csv(feedback_path(user_id), index=False)
-                return self.send_json(200, session_data(user_id))
+                feedback.to_csv(feedback_path(user_id, profile), index=False)
+                return self.send_json(200, session_data(user_id, profile))
 
             if url.path == "/api/skip":
                 movie_id = int(data["movie_id"])
                 if not movies["id"].eq(movie_id).any():
                     return self.send_json(404, {"error": "Movie not found."})
-                skipped_ids = load_skipped_ids(user_id)
+                skipped_ids = load_skipped_ids(user_id, profile)
                 skipped_ids.add(movie_id)
                 pd.DataFrame({"movie_id": sorted(skipped_ids)}).to_csv(
-                    skipped_path(user_id), index=False
+                    skipped_path(user_id, profile), index=False
                 )
-                return self.send_json(200, {"movie": next_movie(user_id)})
+                return self.send_json(200, {"movie": next_movie(user_id, profile)})
 
             if url.path == "/api/reset":
                 pd.DataFrame(columns=["movie_id", "title", "liked"]).to_csv(
-                    feedback_path(user_id), index=False
+                    feedback_path(user_id, profile), index=False
                 )
-                skipped_path(user_id).unlink(missing_ok=True)
-                return self.send_json(200, session_data(user_id))
+                skipped_path(user_id, profile).unlink(missing_ok=True)
+                return self.send_json(200, session_data(user_id, profile))
 
             return self.send_json(404, {"error": "Unknown API route."})
         except (ValueError, KeyError, IndexError, json.JSONDecodeError) as error:

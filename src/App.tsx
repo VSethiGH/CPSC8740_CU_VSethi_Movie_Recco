@@ -13,7 +13,13 @@ type Movie = {
 
 type Feedback = Record<number, 0 | 1>;
 type RatedMovie = { movie: Movie; liked: 0 | 1 };
-type SessionData = { feedback: Feedback; rated: RatedMovie[] };
+type SessionData = {
+  user_id: string;
+  profile: string;
+  profiles: string[];
+  feedback: Feedback;
+  rated: RatedMovie[];
+};
 type MovieListData = { movies: Movie[] };
 type NextMovieData = { movie: Movie | null };
 type Tab = "home" | "reels" | "settings";
@@ -136,6 +142,11 @@ const escapeCsv = (value: string | number) => `"${String(value).replaceAll('"', 
 
 function App() {
   const [userId, setUserId] = useState(() => localStorage.getItem("reelgood_active_id") || "");
+  const [profile, setProfile] = useState(() => {
+    const activeId = localStorage.getItem("reelgood_active_id") || "";
+    return activeId ? localStorage.getItem(`reelgood_profile_${activeId}`) || "default" : "default";
+  });
+  const [profiles, setProfiles] = useState(["default"]);
   const [idInput, setIdInput] = useState("");
   const [tab, setTab] = useState<Tab>("home");
   const [feedback, setFeedback] = useState<Feedback>({});
@@ -151,51 +162,69 @@ function App() {
   const [pointerStart, setPointerStart] = useState<number | null>(null);
   const [dragX, setDragX] = useState(0);
   const [voteFx, setVoteFx] = useState<{ liked: 0 | 1; token: number } | null>(null);
+  const [profileName, setProfileName] = useState("");
+  const [csvText, setCsvText] = useState("");
+  const [importMessage, setImportMessage] = useState("");
   const [theme, setTheme] = useState<"light" | "dark">(
     () => (localStorage.getItem("reelgood_theme") as "light" | "dark") || "dark",
   );
 
-  const storageKey = userId ? `${userId}_movie.csv` : "";
+  const storageKey = userId
+    ? profile === "default"
+      ? `${userId}_movie.csv`
+      : `${userId}__${profile}_movie.csv`
+    : "";
+
+  const applySession = (session: SessionData) => {
+    setFeedback(session.feedback);
+    setRatedMovies(session.rated);
+    setProfile(session.profile);
+    setProfiles(session.profiles);
+    localStorage.setItem(`reelgood_profile_${session.user_id}`, session.profile);
+  };
 
   useEffect(() => {
     if (!userId) return;
     let active = true;
-    apiRequest<SessionData>(`/api/session?user_id=${encodeURIComponent(userId)}`)
+    apiRequest<SessionData>(
+      `/api/session?user_id=${encodeURIComponent(userId)}&profile=${encodeURIComponent(profile)}`,
+    )
       .then((session) => {
         if (!active) return;
-        setFeedback(session.feedback);
-        setRatedMovies(session.rated);
+        applySession(session);
         setApiError("");
       })
       .catch((error: Error) => active && setApiError(error.message));
     return () => {
       active = false;
     };
-  }, [userId]);
+  }, [userId, profile]);
 
   useEffect(() => {
     if (!userId) return;
     let active = true;
     apiRequest<MovieListData>(
-      `/api/recommendations?user_id=${encodeURIComponent(userId)}&limit=10`,
+      `/api/recommendations?user_id=${encodeURIComponent(userId)}&profile=${encodeURIComponent(profile)}&limit=10`,
     )
       .then((result) => active && setRecommendations(result.movies))
       .catch((error: Error) => active && setApiError(error.message));
     return () => {
       active = false;
     };
-  }, [feedback, userId]);
+  }, [feedback, profile, userId]);
 
   useEffect(() => {
     if (!userId) return;
     let active = true;
-    apiRequest<NextMovieData>(`/api/reels/next?user_id=${encodeURIComponent(userId)}`)
+    apiRequest<NextMovieData>(
+      `/api/reels/next?user_id=${encodeURIComponent(userId)}&profile=${encodeURIComponent(profile)}`,
+    )
       .then((result) => active && setReelMovie(result.movie))
       .catch((error: Error) => active && setApiError(error.message));
     return () => {
       active = false;
     };
-  }, [feedback, userId]);
+  }, [feedback, profile, userId]);
 
   useEffect(() => {
     if (!userId || !search.trim()) {
@@ -227,12 +256,12 @@ function App() {
     const clean = idInput.trim().replace(/[^a-zA-Z0-9_-]/g, "");
     if (!clean) return;
     try {
+      const savedProfile = localStorage.getItem(`reelgood_profile_${clean}`) || "default";
       const session = await apiRequest<SessionData>(
-        `/api/session?user_id=${encodeURIComponent(clean)}`,
+        `/api/session?user_id=${encodeURIComponent(clean)}&profile=${encodeURIComponent(savedProfile)}`,
       );
       localStorage.setItem("reelgood_active_id", clean);
-      setFeedback(session.feedback);
-      setRatedMovies(session.rated);
+      applySession(session);
       setApiError("");
       setUserId(clean);
     } catch (error) {
@@ -245,10 +274,9 @@ function App() {
       const session = await apiRequest<SessionData>("/api/feedback", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId, movie_id: movie.id, liked }),
+        body: JSON.stringify({ user_id: userId, profile, movie_id: movie.id, liked }),
       });
-      setFeedback(session.feedback);
-      setRatedMovies(session.rated);
+      applySession(session);
       setApiError("");
       setSelected(null);
       setDragX(0);
@@ -262,13 +290,43 @@ function App() {
       const result = await apiRequest<NextMovieData>("/api/skip", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId, movie_id: movie.id }),
+        body: JSON.stringify({ user_id: userId, profile, movie_id: movie.id }),
       });
       setReelMovie(result.movie);
       setApiError("");
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not skip this movie.");
     }
+  };
+
+  const importCsv = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const session = await apiRequest<SessionData>("/api/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: userId,
+          profile_name: profileName,
+          csv_text: csvText,
+        }),
+      });
+      applySession(session);
+      setProfileName("");
+      setCsvText("");
+      setImportMessage(`Imported ${session.rated.length} movie ratings into ${session.profile}.`);
+      setApiError("");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not import this CSV.");
+      setImportMessage("");
+    }
+  };
+
+  const changeProfile = (nextProfile: string) => {
+    setProfile(nextProfile);
+    localStorage.setItem(`reelgood_profile_${userId}`, nextProfile);
+    setSelected(null);
+    setSearch("");
   };
 
   const playVoteSound = (liked: 0 | 1) => {
@@ -324,10 +382,9 @@ function App() {
       const session = await apiRequest<SessionData>("/api/reset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId }),
+        body: JSON.stringify({ user_id: userId, profile }),
       });
-      setFeedback(session.feedback);
-      setRatedMovies(session.rated);
+      applySession(session);
       setResetStep(0);
       setResetText("");
       setApiError("");
@@ -342,6 +399,11 @@ function App() {
     setIdInput("");
     setFeedback({});
     setRatedMovies([]);
+    setProfile("default");
+    setProfiles(["default"]);
+    setProfileName("");
+    setCsvText("");
+    setImportMessage("");
     setRecommendations([]);
     setReelMovie(null);
     setSearch("");
@@ -597,6 +659,47 @@ function App() {
                 </div>
                 <button onClick={downloadCsv}>Export CSV</button>
               </section>
+              <section className="csv-profile-card">
+                <label htmlFor="csv-profile">Choose ratings CSV</label>
+                <select
+                  id="csv-profile"
+                  value={profile}
+                  onChange={(event) => changeProfile(event.target.value)}
+                >
+                  {profiles.map((item) => (
+                    <option key={item} value={item}>
+                      {item === "default" ? "Default" : item.replace(/[-_]/g, " ")}
+                    </option>
+                  ))}
+                </select>
+                <p>The selected file is used for ratings and recommendations.</p>
+              </section>
+              <form className="import-card" onSubmit={importCsv}>
+                <h3>Import a ratings CSV</h3>
+                <p>CSV needs a movie_id column and a liked column with 1 or 0.</p>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={async (event) => {
+                    const file = event.currentTarget.files?.[0];
+                    if (!file) return;
+                    setProfileName(file.name.replace(/\.csv$/i, ""));
+                    setCsvText(await file.text());
+                    setImportMessage("");
+                  }}
+                />
+                <input
+                  type="text"
+                  value={profileName}
+                  onChange={(event) => setProfileName(event.target.value)}
+                  placeholder="Profile name"
+                  aria-label="Profile name for imported CSV"
+                />
+                <button type="submit" disabled={!csvText.trim() || !profileName.trim()}>
+                  Import CSV
+                </button>
+                {importMessage && <p className="import-message">{importMessage}</p>}
+              </form>
               <div className="stats">
                 <div>
                   <b>{rated.filter((item) => item.liked === 1).length}</b>
@@ -638,7 +741,7 @@ function App() {
               <section className="danger-zone">
                 <div>
                   <h3>Reset feedback</h3>
-                  <p>Clear all ratings and skipped movies for this ID.</p>
+                  <p>Clear ratings and skipped movies in this file.</p>
                 </div>
                 <button onClick={() => setResetStep(1)}>
                   <Icon name="trash" size={17} /> Reset
